@@ -51,19 +51,25 @@ tables =
     (1002,"stav_db",[])  -- Vlastní ID
   ]
 
+process :: IO ()
 process = do
-  parsedData <- parseCsv "../data/update.utf8.txt"
-  --parsedData <- parseCsv "../data/test.txt"
+  --parsedData <- parseCsv "../data/update.utf8.txt"
+  parsedData <- parseCsv "../data/test.txt"
   conn <- connection
-  return $ map (processRecord conn) parsedData
+  mapM_ (processRecord conn) parsedData
 
-processRecord :: Connection -> [String] -> IO Integer
+processRecord :: Connection -> [String] -> IO ()
 processRecord conn record@(recordType:rest) =
   case read recordType::Int of
-      --0   -> "Hlavicka" -- Todo check verze, typ importu TODO!!!!
-      --999 -> "Konec fajlu" -- TODO!!!!
-      _   -> processDbRecord conn record
-        --q("REPLACE INTO `verze` SET `ver_cislo`="$dataVersion", `ver_zsj`="$dataVersionZSJ", `cas_uzav`="$dataVersionClosed"")
+      0   -> do
+                return () -- "Hlavicka" -- Todo check verze, typ importu TODO!!!!
+      999 -> do
+                return () -- "Konec fajlu" -- TODO!!!!
+                --q("REPLACE INTO `verze` SET `ver_cislo`="$dataVersion", `ver_zsj`="$dataVersionZSJ", `cas_uzav`="$dataVersionClosed"")
+      _   -> do
+                processDbRecord conn record
+                return ()
+
 
 processDbRecord :: Connection -> [String] -> IO Integer
 processDbRecord conn record@(tableIdStr:requestType:_:rawParams) =
