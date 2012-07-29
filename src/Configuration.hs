@@ -32,4 +32,3 @@ connection = do
   config <- readConfig
   case readSqlConfig config of Ok conInf -> connectMySQL conInf
                                Error msg -> error ("Cannot parse config file: " ++ msg)
-

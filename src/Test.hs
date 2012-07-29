@@ -1,5 +1,5 @@
 import           Csv
-import           Database.HDBC (toSql, run, runRaw, quickQuery')
+import           Database.HDBC (toSql, fromSql, run, runRaw, quickQuery', commit)
 import           Database.HDBC.MySQL (Connection)
 import           Data.List (intercalate)
 import qualified Data.Map as M
@@ -8,6 +8,7 @@ import           Configuration (connection)
 
 
 type Params = M.Map Int String
+type Record = [String]
 
 tables :: M.Map Int (String,A.Array Int String)
 tables =
@@ -53,19 +54,74 @@ tables =
 
 process :: IO ()
 process = do
-  --parsedData <- parseCsv "../data/update.utf8.txt"
-  parsedData <- parseCsv "../data/test.txt"
+  -- TODO Download z webu
+  parsedData <- parseCsv "../data/update.utf8.txt"
+  --parsedData <- parseCsv "../data/test.txt"
   conn <- connection
-  mapM_ (processRecord conn) parsedData
+  let (header:records) = parsedData
+  setNamesDb conn "utf8" "utf8_unicode_ci"
+  if validHeader conn header
+    then do
+      mapM_ (processRecord conn) $ init records
+      processFooter conn header
+      commit conn
+    else
+      return ()
+
+
+setNamesDb conn encoding collation = do
+  run conn ("SET NAMES '" ++ encoding ++ "' COLLATE '" ++ collation ++ "'") []
+  return ()
+
+-- TOOD
+validHeader :: Connection -> Record -> Bool
+validHeader conn header = do
+  let applicationType     = header !! 1
+      uirVersion          = header !! 2
+      version1            = header !! 3
+      version2            = header !! 4
+      dataVersion         = header !! 5
+      previousVersion     = (read dataVersion::Int) - 1
+      dataVersionZSJ      = header !! 6
+      dataVersionClosed   = parseDateTime $ header !! 7
+  if applicationType /= "UIR-ADR"
+  then
+    if uirVersion == "4"
+    then do
+      print "Importing version " ++ version1 ++ "." ++ version2
+      currentVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?" [toSql dataVersion]
+      if null currentVersionRecords -- && (head currentVersion) !! 2 -- TODO check jestli je ta verze uzavřená ?
+      then do
+        previousVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?" [toSql previousVersion]
+        if not . null previousVersionRecords
+        then return True
+        else do
+          print "Version " ++ dataVersion ++ " couldn't be imported, there is missing version " ++ previousVersion ++ " in database."
+          False
+      else do
+        print "Version " ++ dataVersion ++ " is already imported and closed"
+        False
+    else do
+      print "Change log version " ++ uirVersion ++ " is not supported"
+      False
+  else do
+    print "Change log is for '" ++ applicationType ++ "' application, not for UIR-ADR"
+    False
+
+parseDateTime :: String -> String
+parseDateTime origDateTime = "10.10.2012"
+
+-- TODO
+processFooter :: Connection -> Record -> IO Integer
+processFooter conn header = do
+  let dataVersion         = header !! 5
+      dataVersionZSJ      = header !! 6
+      dataVersionClosed   = parseDateTime $ header !! 7
+  run conn "REPLACE INTO `verze` SET `ver_cislo`=?, `ver_zsj`=?, `cas_uzav`=?" [toSql dataVersion, toSql dataVersionZSJ, toSql dataVersionClosed]
 
 processRecord :: Connection -> [String] -> IO ()
 processRecord conn record@(recordType:rest) =
   case read recordType::Int of
-      0   -> do
-                return () -- "Hlavicka" -- Todo check verze, typ importu TODO!!!!
-      999 -> do
-                return () -- "Konec fajlu" -- TODO!!!!
-                --q("REPLACE INTO `verze` SET `ver_cislo`="$dataVersion", `ver_zsj`="$dataVersionZSJ", `cas_uzav`="$dataVersionClosed"")
       _   -> do
                 processDbRecord conn record
                 return ()
