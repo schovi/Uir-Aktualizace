@@ -1,5 +1,5 @@
 import            Csv
-import            Database.HDBC (toSql, fromSql, run, runRaw, quickQuery', commit)
+import            Database.HDBC (toSql, fromSql, run, runRaw, quickQuery', commit, SqlValue)
 import            Database.HDBC.MySQL (Connection)
 import            Data.List (intercalate)
 import qualified  Data.Map as M
@@ -8,6 +8,7 @@ import            Configuration (connection)
 --import           Text.HandsomeSoup
 --import           Text.XML.HXT.Core
 import            Data.Time
+import            Data.Time.LocalTime (LocalTime)
 import            System.Locale
 
 
@@ -16,7 +17,7 @@ type Params = M.Map Int String
 type Record = [String]
 
 
-tables :: M.Map Int (String,A.Array Int String)
+tables :: M.Map Int (String, A.Array Int String)
 tables =
   M.fromList $ map (\(tableId, tableName, tableColumns) -> (tableId,(tableName,A.listArray (1, length tableColumns) tableColumns))) [
     (1,"okres",["okres_kod", "nazev", "zkratka", "stav", "vznik_dne", "vznik_info", "zanik_dne", "zanik_info", "nuts4", "kraj_kod"]),
@@ -58,6 +59,10 @@ tables =
     (1002,"stav_db",[])  -- Vlastní ID
   ]
 
+dateFields :: [String]
+dateFields = ["vznik_dne", "zanik_dne", "plati_od", "plati_do"]
+
+-- main cycle
 process :: IO ()
 process = do
   -- TODO Download z webu
@@ -75,6 +80,7 @@ process = do
     else
       return ()
 
+-- TODO stahování verzí
 --downloadVersionsPage "http://forms.mpsv.cz/uir/view.jsp?D=Verze_42"
 --downloadVersionsPage :: String ->
 --downloadVersionsPage url = do
@@ -117,10 +123,10 @@ validHeader conn header = do
                             putStrLn $ "Change log is for '" ++ applicationType ++ "' application, not for UIR-ADR."
                             return False
 
-parseDateTime :: String -> UTCTime
+parseDateTime :: String -> LocalTime
 parseDateTime dateTimeStr = readTime defaultTimeLocale "%d.%m.%Y %H:%M:%S" dateTimeStr
 
-parseDate :: String -> UTCTime
+parseDate :: String -> Day
 parseDate dateStr = readTime defaultTimeLocale "%d.%m.%Y" dateStr
 
 processFooter :: Connection -> Record -> IO Integer
@@ -152,8 +158,7 @@ insertRow conn tableId params = do
   let columnNames = " (" ++ intercalate "," (getColumnNames tableId params) ++ ") "
       valueStatement = " (" ++ intercalate "," (replicate (length $ M.keys params) "?") ++ ") "
       sql = "INSERT INTO " ++ getTableName tableId ++ columnNames ++ "VALUES" ++ valueStatement ++ ";"
-      sqlValues = map toSql $ getColumnValues params
-  run conn sql sqlValues
+  run conn sql $ getColumnSqlValues tableId params
 
 updateRow :: Connection -> Int -> Int -> Params -> IO Integer
 updateRow conn tableId recordId params = do
@@ -162,8 +167,7 @@ updateRow conn tableId recordId params = do
       setStatement = intercalate ", " $ map (++ " = ?") $ getColumnNames tableId paramsWithoutPrimaryKey
       whereCondition = primaryKey ++ " = ?"
       sql = "UPDATE " ++ (getTableName tableId) ++ " SET " ++ setStatement ++ " WHERE " ++ whereCondition ++ ";"
-      sqlValues = (map toSql (getColumnValues paramsWithoutPrimaryKey)) ++ [toSql recordId]
-  run conn sql sqlValues
+  run conn sql $ (getColumnSqlValues tableId paramsWithoutPrimaryKey) ++ [toSql recordId]
 
 deleteRow :: Connection -> Int -> Int -> IO Integer
 deleteRow conn tableId recordId = do
@@ -173,11 +177,21 @@ deleteRow conn tableId recordId = do
 
 extractParams :: [String] -> Params
 extractParams params = M.fromList $ map splitParam params
-  where splitParam param = let (key,(_:val)) =span (/='=') param in (read key :: Int,val)
+  where splitParam param = let (key,(_:val)) = span (/='=') param in (read key :: Int,val)
 
 getColumnNames :: Int -> Params -> [String]
 getColumnNames tableId params = map extractColumn $ M.keys params
   where extractColumn columnId = (snd $ tables M.! tableId) A.! columnId
+
+getAllTableColumnNames :: Int -> A.Array Int String
+getAllTableColumnNames tableId = snd $ tables M.! tableId
+
+getColumnSqlValues :: Int -> Params -> [SqlValue]
+getColumnSqlValues tableId params = M.elems $ M.mapWithKey convertParam params
+  where convertParam :: Int -> String -> SqlValue
+        convertParam columnId value = convertType ((getAllTableColumnNames tableId) A.! columnId) value
+        convertType :: String -> String -> SqlValue
+        convertType columnName value = if columnName `elem` dateFields then toSql $ parseDate value else toSql value
 
 getColumnValues :: Params -> [String]
 getColumnValues = M.elems
