@@ -1,14 +1,20 @@
-import           Csv
-import           Database.HDBC (toSql, fromSql, run, runRaw, quickQuery', commit)
-import           Database.HDBC.MySQL (Connection)
-import           Data.List (intercalate)
-import qualified Data.Map as M
-import qualified Data.Array as A
-import           Configuration (connection)
+import            Csv
+import            Database.HDBC (toSql, fromSql, run, runRaw, quickQuery', commit)
+import            Database.HDBC.MySQL (Connection)
+import            Data.List (intercalate)
+import qualified  Data.Map as M
+import qualified  Data.Array as A
+import            Configuration (connection)
+--import           Text.HandsomeSoup
+--import           Text.XML.HXT.Core
+import            Data.Time
+import            System.Locale
+
 
 
 type Params = M.Map Int String
 type Record = [String]
+
 
 tables :: M.Map Int (String,A.Array Int String)
 tables =
@@ -60,7 +66,8 @@ process = do
   conn <- connection
   let (header:records) = parsedData
   setNamesDb conn "utf8" "utf8_unicode_ci"
-  if validHeader conn header
+  valid <- validHeader conn header
+  if valid
     then do
       mapM_ (processRecord conn) $ init records
       processFooter conn header
@@ -68,79 +75,78 @@ process = do
     else
       return ()
 
+--downloadVersionsPage "http://forms.mpsv.cz/uir/view.jsp?D=Verze_42"
+--downloadVersionsPage :: String ->
+--downloadVersionsPage url = do
+--  doc <- fromUrl url
+--  let trs = doc <<< css "tr"
+--      tds = trs <<< css "td"
+--  tds
 
 setNamesDb conn encoding collation = do
   run conn ("SET NAMES '" ++ encoding ++ "' COLLATE '" ++ collation ++ "'") []
   return ()
 
--- TOOD
-validHeader :: Connection -> Record -> Bool
+validHeader :: Connection -> Record -> IO Bool
 validHeader conn header = do
   let applicationType     = header !! 1
       uirVersion          = header !! 2
       version1            = header !! 3
       version2            = header !! 4
-      dataVersion         = header !! 5
-      previousVersion     = (read dataVersion::Int) - 1
-      dataVersionZSJ      = header !! 6
-      dataVersionClosed   = parseDateTime $ header !! 7
-  if applicationType /= "UIR-ADR"
-  then
-    if uirVersion == "4"
-    then do
-      print "Importing version " ++ version1 ++ "." ++ version2
-      currentVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?" [toSql dataVersion]
-      if null currentVersionRecords -- && (head currentVersion) !! 2 -- TODO check jestli je ta verze uzavřená ?
-      then do
-        previousVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?" [toSql previousVersion]
-        if not . null previousVersionRecords
-        then return True
-        else do
-          print "Version " ++ dataVersion ++ " couldn't be imported, there is missing version " ++ previousVersion ++ " in database."
-          False
-      else do
-        print "Version " ++ dataVersion ++ " is already imported and closed"
-        False
-    else do
-      print "Change log version " ++ uirVersion ++ " is not supported"
-      False
-  else do
-    print "Change log is for '" ++ applicationType ++ "' application, not for UIR-ADR"
-    False
+      dataVersion         = read (header !! 5)::Int
+      previousVersion     = dataVersion - 1
+  case (applicationType, uirVersion) of
+    ("UIR-ADR", "4")  -> do
+                            putStrLn $ "Importing version " ++ version1 ++ "." ++ version2
+                            currentVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?;" [toSql dataVersion]
+                            if null currentVersionRecords -- && (head currentVersion) !! 2 -- TODO check jestli je ta verze uzavřená ?
+                            then do
+                              previousVersionRecords <- quickQuery' conn "select * from `verze` where `ver_cislo`=?;" [toSql previousVersion]
+                              if not $ null previousVersionRecords
+                              then return True
+                              else do
+                                putStrLn $ "Version " ++ show dataVersion ++ " couldn't be imported, there is missing version " ++ show previousVersion ++ " in database."
+                                return False
+                            else do
+                              putStrLn $ "Version " ++ show dataVersion ++ " is already imported and closed."
+                              return False
+    ("UIR-ADR", _)    -> do
+                            putStrLn $ "Change log version " ++ uirVersion ++ " is not supported."
+                            return False
+    (_, "4")          -> do
+                            putStrLn $ "Change log is for '" ++ applicationType ++ "' application, not for UIR-ADR."
+                            return False
 
-parseDateTime :: String -> String
-parseDateTime origDateTime = "10.10.2012"
+parseDateTime :: String -> UTCTime
+parseDateTime dateTimeStr = readTime defaultTimeLocale "%d.%m.%Y %H:%M:%S" dateTimeStr
 
--- TODO
+parseDate :: String -> UTCTime
+parseDate dateStr = readTime defaultTimeLocale "%d.%m.%Y" dateStr
+
 processFooter :: Connection -> Record -> IO Integer
 processFooter conn header = do
-  let dataVersion         = header !! 5
-      dataVersionZSJ      = header !! 6
+  let dataVersion         = read (header !! 5)::Int
+      dataVersionZSJ      = read (header !! 6)::Int
       dataVersionClosed   = parseDateTime $ header !! 7
   run conn "REPLACE INTO `verze` SET `ver_cislo`=?, `ver_zsj`=?, `cas_uzav`=?" [toSql dataVersion, toSql dataVersionZSJ, toSql dataVersionClosed]
 
-processRecord :: Connection -> [String] -> IO ()
-processRecord conn record@(recordType:rest) =
-  case read recordType::Int of
-      _   -> do
-                processDbRecord conn record
-                return ()
-
-
-processDbRecord :: Connection -> [String] -> IO Integer
-processDbRecord conn record@(tableIdStr:requestType:_:rawParams) =
+processRecord :: Connection -> [String] -> IO Bool
+processRecord conn (tableIdStr:requestType:_:rawParams) =
   let params = extractParams rawParams
       tableId :: Int
       tableId = read tableIdStr
       recordId :: Int
       recordId = read (params M.! 1)
   in case read requestType::Int of
-        0 -> deleteRow conn tableId recordId
-        1 -> insertRow conn tableId params
-        2 -> updateRow conn tableId recordId params
-        --_ -> "Unknown command '" ++ show requestType ++ "'"  TODO!!!!
+        0 -> do deleteRow conn tableId recordId
+                return True
+        1 -> do insertRow conn tableId params
+                return True
+        2 -> do updateRow conn tableId recordId params
+                return True
+        _ -> do putStrLn $ "Unknown command '" ++ requestType ++ "'"
+                return False
 
--- INSERT INTO adresa (adresa_kod,cislo,nazev) VALUES (11111, 1,"neco");
 insertRow :: Connection -> Int -> Params -> IO Integer
 insertRow conn tableId params = do
   let columnNames = " (" ++ intercalate "," (getColumnNames tableId params) ++ ") "
@@ -149,7 +155,6 @@ insertRow conn tableId params = do
       sqlValues = map toSql $ getColumnValues params
   run conn sql sqlValues
 
--- UPDATE adresa SET cislo = 1, nazev = "neco" WHERE adresa_kod = 11111;
 updateRow :: Connection -> Int -> Int -> Params -> IO Integer
 updateRow conn tableId recordId params = do
   let primaryKey = getTablePrimaryKeyName tableId
@@ -160,7 +165,6 @@ updateRow conn tableId recordId params = do
       sqlValues = (map toSql (getColumnValues paramsWithoutPrimaryKey)) ++ [toSql recordId]
   run conn sql sqlValues
 
---DELETE FROM adresa where adresa_kod = 11111;
 deleteRow :: Connection -> Int -> Int -> IO Integer
 deleteRow conn tableId recordId = do
   let primaryKey = getTablePrimaryKeyName tableId
